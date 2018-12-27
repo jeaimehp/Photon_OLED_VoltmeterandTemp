@@ -1,3 +1,10 @@
+// This #include statement was automatically added by the Particle IDE.
+#include <ThingSpeak.h>
+
+// This #include statement was automatically added by the Particle IDE.
+#define ARDUINOJSON_ENABLE_ARDUINO_STRING 1
+#include <ArduinoJson.h>
+
 /****************************************************
  * Program By: Je'aime Powell                       *
  * Purpose: Sensor to detect, and publish temp (C), *
@@ -8,8 +15,10 @@
  *                                                  *
  *  A0 <== Max471 GY-471 Out                        *   
  *  A1 <== Voltage Divider Out                      *
- *  A6 <== Thermistor Signal                        *
+ *  A6 <== Thermistor1 Signal                       *
+ *  A7 <== Thermister2 Signal                       *
  *  D2 <== DS18B20 Signal                           *
+ *  D5 <== Relay IN1 (Buck Converter)               *
  *                                                  *
  * *************************************************/
  
@@ -48,8 +57,10 @@
 #define TEMPERATURENOMINAL 25   
 // The beta coefficient of the thermistor (usually 3000-4000)
 #define BCOEFFICIENT 3950
+#define THERMISTORPIN2 A7
   
-
+// Relay
+#define RELAY1 D5
 
 
 /*
@@ -104,7 +115,9 @@ MicroOLED oled;
 ////////////
 const int      MAXRETRY          = 4;
 const uint32_t msSAMPLE_INTERVAL = 2500;
-const uint32_t msMETRIC_PUBLISH  = 10000;
+const uint32_t msMETRIC_PUBLISH  = 5000;
+const uint32_t msDATA_PUBLISH  = 30000;
+uint32_t msLast_Data_Sample = 0; 
 
 DS18B20  ds18b20(D2, true); //Sets Pin D2 for Water Temp Sensor and 
                             // this is the only sensor on bus
@@ -113,9 +126,12 @@ double   celsius;
 double   fahrenheit;
 uint32_t msLastMetric;
 uint32_t msLastSample;
+int relaystate = 0;
 
-
-
+//Thingspeak API
+TCPClient client;
+unsigned int myChannelNumber = 663664;
+const char * myWriteAPIKey = "XXXXXXXXXXXXX"; //<--Remove API for Github upload
 
 ///////////
 // INA219
@@ -153,8 +169,15 @@ void setup()
   //Themistor Pin Definition
   pinMode(THERMISTORPIN, INPUT); 
   
+  //Themistor2 Pin Definition
+  pinMode(THERMISTORPIN2, INPUT);
   
+  //Pin Relay turn on buckconverter
+  pinMode(RELAY1, OUTPUT);
+  //Setup Function 
+  Particle.function("buckconverter" , buckconverter);
   
+  ThingSpeak.begin(client);
   
 }
 
@@ -166,7 +189,7 @@ void loop()
   }
 
   if (millis() - msLastMetric >= msMETRIC_PUBLISH){
-    Serial.println("Publishing now.");
+    //Serial.println("Publishing now.");
     publishData();
   }
   
@@ -195,8 +218,13 @@ void printTitle(String title, int font)
 //
 //////////////////////////////////////////////////////////////////////////////
 void publishData(){
+  //Create JSON string
+  //ref: https://arduinojson.org/ and https://www.youtube.com/watch?v=z_rPvQhKTfY
+  DynamicJsonBuffer jBuffer;
+  JsonObject& root = jBuffer.createObject();
+  
   sprintf(szInfo, "%2.2f", celsius);
-  Particle.publish("dsTmp", szInfo, PRIVATE);
+  //Particle.publish("dsTmp", szInfo, PRIVATE);
   msLastMetric = millis();
   oled.clear(PAGE);     // Clear the screen
   oled.setFontType(1);  // Set font to type 0
@@ -226,7 +254,54 @@ void publishData(){
   temperature = temperature - 273.15; /* Temperature in degree Celsius */                  // convert to C
   float steinhart = temperature;
   
-  Particle.publish("Thermistor" , String(steinhart));
+  //Particle.publish("Thermistor1" , String(steinhart));
+  //Particle.publish("Thermistor1" , String(thermistor_raw));
+  //Thermistor2 Input  
+  // Ref: https://learn.adafruit.com/thermistor/using-a-thermistor
+  double thermistor2_raw = analogRead(THERMISTORPIN2);
+  thermistor2_raw = (thermistor2_raw * 3.3)  / 4095.0;
+  double thermistor2_resistance = ( ( 3.3 * ( 10.0 / thermistor2_raw ) ) - 10 ); // Resistance in kilo ohms
+  thermistor2_resistance = thermistor2_resistance * 1000;
+  //Convert resistance to Celsius with Steinhart Formula
+  
+  double therm2_res_ln = log(thermistor2_resistance);
+  double temperature2 = ( 1 / ( 0.001129148 + ( 0.000234125 * therm2_res_ln ) + ( 0.0000000876741 * therm2_res_ln * therm2_res_ln * therm2_res_ln ) ) ); /* Temperature in Kelvin */
+  temperature2 = temperature2 - 273.15; /* Temperature in degree Celsius */                  // convert to C
+  float steinhart2 = temperature2;
+  
+  //Particle.publish("Thermistor2" , String(steinhart2));
+  //Particle.publish("Thermistor2" , String(thermistor2_raw));
+  
+  //JSON string creation
+  root["BuckPower"] = relaystate;
+  root["CurrentDraw"] = current;
+  root["Voltage"] = voltage;
+  root["DigitalTemp"] = celsius;
+  root["Thermister1"] = temperature;
+  root["Thermister2"] = temperature2;
+  
+  
+  String jsonout;
+  root.printTo(jsonout);
+  if (millis() - msLast_Data_Sample >= msDATA_PUBLISH){
+    //Serial.println("Publishing now.");
+    Particle.publish("Data", jsonout);
+    ThingSpeak.setField(1,root.get<int>("BuckPower"));
+    ThingSpeak.setField(2,root.get<float>("CurrentDraw"));
+    ThingSpeak.setField(3,root.get<float>("Voltage"));
+    ThingSpeak.setField(4,root.get<float>("DigitalTemp"));
+    ThingSpeak.setField(5,root.get<float>("Thermister1"));
+    ThingSpeak.setField(6,root.get<float>("Thermister2"));
+    ThingSpeak.writeFields(myChannelNumber, myWriteAPIKey);  
+    
+    //Particle.publish("ThingSpeak", jsonout , 60 , PRIVATE);
+    msLast_Data_Sample = millis();
+  }
+ 
+  
+  
+  //Particle.publish("Data" , jsonout);
+  
   
   
   oled.setCursor(0, 16);
@@ -266,6 +341,21 @@ void getTemp(){
     Serial.println("Invalid reading");
   }
   msLastSample = millis();
+}
+
+int buckconverter(String power){
+    //int state;
+    if (power == "on"){
+        digitalWrite(RELAY1, HIGH);
+        Particle.publish("Buck Converter" , "On");
+        relaystate = 1;
+    }
+    else{
+        digitalWrite(RELAY1, LOW);
+        Particle.publish("Buck Converter" , "OFF");
+        relaystate = 0;
+    }
+    return relaystate;
 }
   
   
